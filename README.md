@@ -159,3 +159,8 @@ If you open an issue, please include:
 
 CTC is an operator-facing tool intended for development/testing and internal workflows.  
 Use caution before connecting to production or safety-critical devices, especially when enabling command functions.
+
+## Preview
+
+https://github.com/user-attachments/assets/65ecc39c-dcc0-40a0-8a43-669ba42dc193
+

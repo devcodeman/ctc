@@ -2,7 +2,6 @@ import reflex as rx
 
 from .state import TelemetryState
 
-
 def status_badge() -> rx.Component:
     return rx.badge(
         TelemetryState.connection_label,
@@ -107,14 +106,18 @@ def control_panel() -> rx.Component:
                 spacing="3",
                 wrap="wrap",
             ),
-            rx.hstack(
-                rx.text("Last seen:", color="gray"),
-                rx.text(TelemetryState.last_seen_text),
-                rx.text("|", color="gray"),
-                rx.text("Failures:", color="gray"),
-                rx.text(TelemetryState.consecutive_failures),
-                spacing="2",
-                wrap="wrap",
+            rx.cond(
+                TelemetryState.connected,
+                rx.hstack(
+                    rx.text("Connection Failures:", color="gray"),
+                    rx.text(TelemetryState.consecutive_failures),
+                    rx.text("|", color="gray"),
+                    rx.text("Latency:", color="gray"),
+                    rx.text(TelemetryState.latency_ms),
+                    rx.text("ms", color="gray"),
+                    spacing="2",
+                    wrap="wrap",
+                ),
             ),
             rx.text(
                 rx.cond(
@@ -142,19 +145,56 @@ def control_panel() -> rx.Component:
     )
 
 
-def summary_grid() -> rx.Component:
-    return rx.grid(
-        metric_card("Mode", TelemetryState.mode),
-        metric_card("Temperature", TelemetryState.temp_c, "°C"),
-        metric_card("Voltage", TelemetryState.voltage_v, "V"),
-        metric_card("Current", TelemetryState.current_a, "A"),
-        metric_card("Uptime", TelemetryState.uptime_s, "s"),
-        metric_card("Latency", TelemetryState.latency_ms_display, "ms"),
-        columns="3",
-        spacing="4",
-        width="100%",
-    )
+def device_info_card() -> rx.Component:
+    return rx.card(
+        rx.vstack(
+            rx.hstack(
+                rx.heading("Device Information", size="5"),
+                width="100%",
+                align="center",
+            ),
 
+            rx.cond(
+                TelemetryState.connected,
+                rx.vstack(
+                    rx.cond(
+                        TelemetryState.device_version != "",
+                        rx.hstack(
+                            rx.text("Version", size="2", color="gray", width="140px"),
+                            rx.text(TelemetryState.device_version, size="2"),
+                            width="100%",
+                            align="center",
+                        ),
+                        rx.fragment(),
+                    ),
+                    rx.cond(
+                        TelemetryState.device_git_hash != "",
+                        rx.hstack(
+                            rx.text("Git Hash", size="2", color="gray", width="140px"),
+                            rx.text(TelemetryState.device_git_hash, size="2", font_family="monospace"),
+                            width="100%",
+                            align="center",
+                        ),
+                        rx.fragment(),
+                    ),
+                    rx.cond(
+                        TelemetryState.has_device_info,
+                        rx.fragment(),
+                        rx.text("Connected, but Version/Git Hash not present in /status.", size="2", color="gray"),
+                    ),
+                    spacing="2",
+                    align="start",
+                    width="100%",
+                ),
+                rx.text("Connect to a device to view device information.", size="2", color="gray"),
+            ),
+
+            spacing="2",
+            align="start",
+            width="100%",
+        ),
+        size="3",
+    )
 
 def faults_panel() -> rx.Component:
     return rx.card(
@@ -218,65 +258,279 @@ def event_log_panel() -> rx.Component:
         size="3",
     )
 
+def telemetry_panel() -> rx.Component:
+    return rx.card(
+        rx.vstack(
+            # Header row
+            rx.hstack(
+                rx.heading("Raw Telemetry", size="5"),
+                rx.spacer(),
+                rx.badge(
+                    rx.cond(
+                        TelemetryState.filtered_telemetry_rows.length() > 0,
+                        "LIVE",
+                        "NO DATA",
+                    ),
+                    color_scheme=rx.cond(
+                        TelemetryState.filtered_telemetry_rows.length() > 0,
+                        "green",
+                        "gray",
+                    ),
+                    variant="soft",
+                ),
+                width="100%",
+                align="center",
+            ),
+
+            rx.input(
+                value=TelemetryState.telemetry_filter_text,
+                on_change=TelemetryState.set_telemetry_filter_text,
+                placeholder="Filter telemetry (key or value)...",
+                width="100%",
+            ),
+
+            rx.hstack(
+                rx.text("Showing", size="2", color="gray"),
+                rx.text(TelemetryState.filtered_telemetry_rows.length(), size="2"),
+                rx.text("of", size="2", color="gray"),
+                rx.text(TelemetryState.telemetry_rows.length(), size="2"),
+                rx.text("fields", size="2", color="gray"),
+                spacing="1",
+                wrap="wrap",
+                width="100%",
+                align="center",
+            ),
+
+            rx.cond(
+                TelemetryState.filtered_telemetry_rows.length() > 0,
+                rx.box(
+                    rx.vstack(
+                        rx.foreach(
+                            TelemetryState.filtered_telemetry_rows,
+                            lambda row: rx.hstack(
+                                rx.text(
+                                    row["key"],
+                                    size="2",
+                                    color="gray",
+                                    width="40%",
+                                ),
+                                rx.text(
+                                    row["value"],
+                                    size="2",
+                                    width="60%",
+                                    overflow_wrap="anywhere",
+                                    font_family="monospace",
+                                ),
+                                width="100%",
+                                align="start",
+                            ),
+                        ),
+                        spacing="2",
+                        align="start",
+                        width="100%",
+                    ),
+                    width="100%",
+                    max_height="280px",
+                    overflow_y="auto",
+                    border="1px solid var(--gray-5)",
+                    border_radius="8px",
+                    padding="8px",
+                ),
+                rx.cond(
+                    TelemetryState.telemetry_rows.length() > 0,
+                    rx.text(
+                        "No telemetry fields match the current filter.",
+                        color="gray",
+                        size="2",
+                    ),
+                    rx.text("No telemetry received yet.", color="gray", size="2"),
+                ),
+            ),
+
+            spacing="3",
+            align="start",
+            width="100%",
+        ),
+        size="3",
+    )
+
 def trends_panel() -> rx.Component:
     return rx.card(
         rx.vstack(
             rx.hstack(
                 rx.heading("Telemetry Trends", size="5"),
+                rx.spacer(),
                 rx.badge(
-                    rx.cond(TelemetryState.history_points > 0, "Live", "No Data"),
-                    color_scheme=rx.cond(TelemetryState.history_points > 0, "green", "gray"),
+                    rx.cond(
+                        TelemetryState.dynamic_history.length() > 0,
+                        "LIVE",
+                        "NO DATA",
+                    ),
+                    color_scheme=rx.cond(
+                        TelemetryState.dynamic_history.length() > 0,
+                        "green",
+                        "gray",
+                    ),
                     variant="soft",
                 ),
-                rx.spacer(),
-                rx.text("Samples:", color="gray"),
-                rx.text(TelemetryState.sample_index),
                 width="100%",
                 align="center",
             ),
-            rx.recharts.line_chart(
-                rx.recharts.cartesian_grid(stroke_dasharray="3 3"),
-                rx.recharts.x_axis(data_key="t"),
-                rx.recharts.y_axis(y_axis_id="left"),
-                rx.recharts.y_axis(y_axis_id="right", orientation="right"),
-                rx.recharts.graphing_tooltip(),
-                rx.recharts.legend(),
-                rx.recharts.line(
-                    data_key="temp_c",
-                    name="Temp (°C)",
-                    y_axis_id="left",
-                    type_="monotone",
-                    dot=False,
-                    stroke="#f59e0b",  # amber
-                    stroke_width=2
+            rx.vstack(
+                rx.hstack(
+                    rx.text("Currently Plotting", size="2", color="gray"),
+                    rx.spacer(),
+                    rx.text(
+                        TelemetryState.selected_trend_keys.length(),
+                        size="2",
+                    ),
+                    rx.text("/ 4", size="2", color="gray"),
+                    width="100%",
+                    align="center",
                 ),
-                rx.recharts.line(
-                    data_key="voltage_v",
-                    name="Voltage (V)",
-                    y_axis_id="right",
-                    type_="monotone",
-                    dot=False,
-                    stroke="#3b82f6",  # blue
-                    stroke_width=2
+                rx.cond(
+                    TelemetryState.selected_trend_keys.length() > 0,
+                    rx.box(
+                        rx.vstack(
+                            rx.foreach(
+                                TelemetryState.selected_trend_keys,
+                                lambda key: rx.hstack(
+                                    rx.badge(key, variant="soft"),
+                                    rx.spacer(),
+                                    rx.button(
+                                        "Remove",
+                                        size="1",
+                                        variant="soft",
+                                        on_click=lambda: TelemetryState.toggle_trend_key(key),
+                                    ),
+                                    width="100%",
+                                    align="center",
+                                ),
+                            ),
+                            spacing="2",
+                            width="100%",
+                            align="start",
+                        ),
+                        width="100%",
+                        max_height="140px",
+                        overflow_y="auto",
+                        border="1px solid var(--gray-5)",
+                        border_radius="8px",
+                        padding="8px",
+                    ),
+                    rx.text("No keys selected. Add one or more keys below.", size="2", color="gray"),
                 ),
-                rx.recharts.line(
-                    data_key="current_a",
-                    name="Current (A)",
-                    y_axis_id="right",
-                    type_="monotone",
-                    dot=False,
-                    stroke="#10b981",  # green
-                    stroke_width=2
-                ),
-                data=TelemetryState.history,
                 width="100%",
-                height=320,
+                spacing="2",
+                align="start",
             ),
-            rx.text(
-                "X-axis = sample number (latest on the right).",
-                color="gray",
-                size="2",
+            rx.cond(
+                TelemetryState.dynamic_history.length() > 0,
+                rx.cond(
+                    TelemetryState.selected_trend_keys.length() > 0,
+                    rx.box(
+                        rx.recharts.line_chart(
+                            rx.recharts.cartesian_grid(stroke_dasharray="3 3"),
+                            rx.recharts.x_axis(data_key="t"),
+                            rx.recharts.y_axis(),
+                            rx.recharts.tooltip(),
+                            rx.recharts.legend(),
+                            rx.foreach(
+                                TelemetryState.trend_line_rows,
+                                lambda row: rx.recharts.line(
+                                    data_key=row["key"],
+                                    type_="monotone",
+                                    dot=False,
+                                    stroke_width=2,
+                                    stroke=row["color"],
+                                ),
+                            ),
+                            data=TelemetryState.dynamic_history,
+                            width="100%",
+                            height=320,
+                        ),
+                        width="100%",
+                        overflow_x="auto",
+                    ),
+                    rx.text("Select at least one trend key to plot.", color="gray", size="2"),
+                ),
+                rx.text("No trend data yet. Connect to a device to begin plotting.", color="gray"),
             ),
+            rx.vstack(
+                rx.text("Add Trend Keys", size="2", color="gray"),
+                rx.input(
+                    value=TelemetryState.trend_filter_text,
+                    on_change=TelemetryState.set_trend_filter_text,
+                    placeholder="Filter numeric telemetry keys...",
+                    width="100%",
+                ),
+                rx.hstack(
+                    rx.text("Available:", size="2", color="gray"),
+                    rx.text(TelemetryState.filtered_numeric_telemetry_keys.length(), size="2"),
+                    rx.spacer(),
+                    rx.button(
+                        "Select Filtered",
+                        size="1",
+                        variant="soft",
+                        on_click=TelemetryState.select_filtered_trend_keys,
+                    ),
+                    rx.button(
+                        "Clear All",
+                        size="1",
+                        variant="soft",
+                        on_click=TelemetryState.clear_selected_trend_keys,
+                    ),
+                    spacing="2",
+                    width="100%",
+                    align="center",
+                    wrap="wrap",
+                ),
+                rx.box(
+                    rx.vstack(
+                        rx.foreach(
+                            TelemetryState.trend_key_rows,
+                            lambda row: rx.hstack(
+                                rx.text(
+                                    row["key"],
+                                    size="2",
+                                    font_family="monospace",
+                                ),
+                                rx.spacer(),
+                                rx.cond(
+                                    row["selected"],
+                                    rx.button(
+                                        "Selected",
+                                        size="1",
+                                        variant="soft",
+                                        disabled=True,
+                                    ),
+                                    rx.button(
+                                        "Add",
+                                        size="1",
+                                        variant="soft",
+                                        on_click=lambda: TelemetryState.toggle_trend_key(row["key"]),
+                                    ),
+                                ),
+                                width="100%",
+                                align="center",
+                            ),
+                        ),
+                        spacing="2",
+                        width="100%",
+                        align="start",
+                    ),
+                    width="100%",
+                    max_height="180px",
+                    overflow_y="auto",
+                    border="1px solid var(--gray-5)",
+                    border_radius="8px",
+                    padding="8px",
+                ),
+                width="100%",
+                spacing="2",
+                align="start",
+            ),
+
             spacing="3",
             align="start",
             width="100%",
@@ -462,14 +716,11 @@ def index() -> rx.Component:
     return rx.container(
         rx.vstack(
             rx.heading("Command & Telemetry Center", size="8"),
-            rx.text(
-                "MVP: poll /status from a device over Ethernet and display normalized telemetry",
-                color="gray",
-            ),
             control_panel(),
+            device_info_card(),
             logging_panel(),
             command_panel(),
-            summary_grid(),
+            telemetry_panel(),
             trends_panel(),
             rx.grid(
                 faults_panel(),

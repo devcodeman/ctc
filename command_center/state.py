@@ -8,8 +8,13 @@ from datetime import datetime, timezone
 
 import reflex as rx
 
-from .device_client import fetch_status, parse_status, send_command
+from .device_client import fetch_status, send_command
 
+MAX_EVENT_LOG_ENTRIES = 200
+DEFAULT_HISTORY_LIMIT = 25
+DEFAULT_FETCH_TIMEOUT_S = 1.0
+DEFAULT_COMMAND_TIMEOUT_S = 2.0
+MAX_TREND_KEYS = 4
 
 class TelemetryState(rx.State):
     # ---- controls ----
@@ -27,17 +32,28 @@ class TelemetryState(rx.State):
     consecutive_failures: int = 0
 
     # ---- telemetry ----
-    mode: str = "UNKNOWN"
-    uptime_s: int = 0
-    temp_c: float = 0.0
-    voltage_v: float = 0.0
-    current_a: float = 0.0
     faults: list[str] = []
+    telemetry: dict = {}
+    telemetry_rows: list[dict] = []
+    numeric_telemetry_keys: list[str] = []
+    telemetry_filter_text: str = ""
+    filtered_telemetry_rows: list[dict] = []
+    device_version: str = ""
+    device_git_hash: str = ""
 
     # ---- trend history ----
     history: list[dict] = []
-    history_limit: int = 50  # ~5 minutes at 1 Hz
+    history_limit: int = 50
     sample_index: int = 0
+    dynamic_history: list[dict] = []
+    dynamic_history_limit: int = DEFAULT_HISTORY_LIMIT
+    dynamic_sample_index: int = 0
+    selected_trend_keys: list[str] = []
+    trend_filter_text: str = ""
+    filtered_numeric_telemetry_keys: list[str] = []
+    trend_key_rows: list[dict] = []
+    trend_line_rows: list[dict] = []
+    trend_keys_initialized: bool = False
 
     # ---- debug/logging ----
     raw_json: str = "{}"
@@ -54,7 +70,7 @@ class TelemetryState(rx.State):
     command_args_json: str = "{}"
     command_busy: bool = False
     last_command_name: str = ""
-    last_command_status: str = "Idle"
+    last_command_status: str = "IDLE"
     last_command_response: str = ""
     last_command_latency_ms: float = 0.0
 
@@ -98,7 +114,19 @@ class TelemetryState(rx.State):
 
     @rx.var
     def logging_status_label(self) -> str:
-        return "Logging ON" if self.log_to_file else "Logging OFF"
+        return "ON" if self.log_to_file else "OFF"
+    
+    @rx.var
+    def has_device_info(self) -> bool:
+        return bool(self.device_version or self.device_git_hash)
+    
+    @rx.var
+    def device_address(self) -> str:
+        host = self.device_host.strip()
+        port = self.device_port.strip()
+        if port:
+            return f"{host}:{port}"
+        return host
     
     def cmd_reset(self):
         if self.command_busy:
@@ -125,12 +153,10 @@ class TelemetryState(rx.State):
 
     def set_device_port(self, value: str):
         v = value.strip()
-        # Allow blank while typing
         if v == "":
             self.device_port = v
             return
 
-        # Simple numeric guard
         if v.isdigit():
             try:
                 port = int(v)
@@ -152,13 +178,34 @@ class TelemetryState(rx.State):
     def set_command_args_json(self, value: str):
         self.command_args_json = value
 
-    @rx.var
-    def device_address(self) -> str:
-        host = self.device_host.strip()
-        port = self.device_port.strip()
-        if port:
-            return f"{host}:{port}"
-        return host
+    def set_telemetry_filter_text(self, value: str):
+        self.telemetry_filter_text = value
+        self._rebuild_filtered_telemetry_rows()
+
+    def set_trend_filter_text(self, value: str):
+        self.trend_filter_text = value
+        self._rebuild_filtered_numeric_telemetry_keys()
+
+    def select_filtered_trend_keys(self):
+        """Add filtered keys to selection up to MAX_TREND_KEYS."""
+        selected = list(self.selected_trend_keys)
+
+        for key in self.filtered_numeric_telemetry_keys:
+            if key in selected:
+                continue
+            if len(selected) >= MAX_TREND_KEYS:
+                break
+            selected.append(key)
+
+        self.selected_trend_keys = selected
+
+        self._rebuild_trend_key_rows()
+
+    def clear_selected_trend_keys(self):
+        """Clear all selected trend keys."""
+        self.selected_trend_keys = []
+        self._rebuild_trend_key_rows()
+        self._rebuild_trend_line_rows()
 
     def send_custom_command(self):
         """Send command from UI input fields."""
@@ -174,29 +221,24 @@ class TelemetryState(rx.State):
     def connect(self):
         if self.running:
             return
+        self._reset_live_snapshot()
         self.running = True
-        self.last_error = ""
-        self.history = []
-        self.sample_index = 0
         self.poll_session_id += 1
-        self.event_log.append(f"Starting poll loop for {self.device_address}")
-        if len(self.event_log) > 200:
-            self.event_log = self.event_log[-200:]
+        self._append_event_log(f"Starting poll loop for {self.device_address}")
         return TelemetryState.poll_loop
 
     def disconnect(self):
         self.running = False
         self.connected = False
-        self.event_log.append("Polling stopped by operator")
-        if len(self.event_log) > 200:
-            self.event_log = self.event_log[-200:]
+        self._reset_live_snapshot()
+        self._reset_trend_history()
+        self._append_event_log("Polling stopped by operator")
 
     def clear_log(self):
         self.event_log = []
 
     def toggle_file_logging(self):
         """Toggle background telemetry file logging on/off."""
-        # Turning ON
         if not self.log_to_file:
             logs_dir = Path("logs")
             logs_dir.mkdir(parents=True, exist_ok=True)
@@ -209,39 +251,34 @@ class TelemetryState(rx.State):
             self.log_file_path = str(file_path)
             self.log_samples_written = 0
             self.log_to_file = True
-            self.event_log.append(f"File logging enabled: {self.log_file_path}")
+            self._append_event_log(f"File logging enabled: {self.log_file_path}")
         else:
-            # Turning OFF
             self.log_to_file = False
-            self.event_log.append("File logging disabled")
+            self._append_event_log("File logging disabled")
 
-        if len(self.event_log) > 200:
-            self.event_log = self.event_log[-200:]
-
-    def _append_jsonl_record(self, record: dict):
-        """Append one JSON object as a line to the current log file."""
-        if not self.log_to_file or not self.log_file_path:
+    def toggle_trend_key(self, key: str):
+        """Toggle a trend key on/off for plotting."""
+        if key in self.selected_trend_keys:
+            self.selected_trend_keys = [k for k in self.selected_trend_keys if k != key]
             return
 
-        path = Path(self.log_file_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        if len(self.selected_trend_keys) >= MAX_TREND_KEYS:
+            # Optional: add an event log message here if you want user feedback.
+            return
 
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, separators=(",", ":")) + "\n")
+        self.selected_trend_keys = [*self.selected_trend_keys, key]
+
+        self._rebuild_trend_key_rows()
 
     def export_log_to_json(self):
         """Convert current session JSONL log file into a nominal JSON file (array payload)."""
         if not self.log_file_path:
-            self.event_log.append("Export skipped: no log file path available")
-            if len(self.event_log) > 200:
-                self.event_log = self.event_log[-200:]
+            self._append_event_log("Export skipped: no log file path available")
             return
 
         src = Path(self.log_file_path)
         if not src.exists():
-            self.event_log.append(f"Export failed: log file not found: {src}")
-            if len(self.event_log) > 200:
-                self.event_log = self.event_log[-200:]
+            self._append_event_log(f"Export failed: log file not found: {src}")
             return
 
         try:
@@ -255,9 +292,7 @@ class TelemetryState(rx.State):
                         samples.append(json.loads(line))
                     except json.JSONDecodeError as e:
                         # Skip malformed line but log it
-                        self.event_log.append(f"Export warning: bad JSONL line {line_no}: {e}")
-                        if len(self.event_log) > 200:
-                            self.event_log = self.event_log[-200:]
+                        self._append_event_log(f"Export warning: bad JSONL line {line_no}: {e}")
 
             export_obj = {
                 "exported_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -272,20 +307,148 @@ class TelemetryState(rx.State):
                 json.dump(export_obj, f, indent=2)
 
             self.last_export_json_path = str(dst)
-            self.event_log.append(f"Exported JSON: {self.last_export_json_path} ({len(samples)} samples)")
-            if len(self.event_log) > self.history_limit:
-                self.event_log = self.event_log[-self.history_limit:]
+            self._append_event_log(f"Exported JSON: {self.last_export_json_path} ({len(samples)} samples)")
 
         except Exception as e:
-            self.event_log.append(f"Export failed: {e}")
-            if len(self.event_log) > self.history_limit:
-                self.event_log = self.event_log[-self.history_limit:]
+            self._append_event_log(f"Export failed: {e}")
+
+    def add_trend_key(self, key: str):
+        if key in self.selected_trend_keys:
+            return
+        if len(self.selected_trend_keys) >= MAX_TREND_KEYS:
+            return
+        self.selected_trend_keys = [*self.selected_trend_keys, key]
+        self._rebuild_trend_key_rows()
+
+    def remove_trend_key(self, key: str):
+        if key not in self.selected_trend_keys:
+            return
+        self.selected_trend_keys = [k for k in self.selected_trend_keys if k != key]
+        self._rebuild_trend_key_rows()
+
+    def _append_jsonl_record(self, record: dict):
+        """Append one JSON object as a line to the current log file."""
+        if not self.log_to_file or not self.log_file_path:
+            return
+
+        path = Path(self.log_file_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+    def _append_event_log(self, message: str):
+        self.event_log.append(message)
+        if len(self.event_log) > MAX_EVENT_LOG_ENTRIES:
+            self.event_log = self.event_log[-MAX_EVENT_LOG_ENTRIES:]
+
+    def _append_dynamic_history_sample(self):
+        """Append one trend sample using selected numeric telemetry keys."""
+        # Auto-select only once per session (or until explicit reset)
+        if (not self.trend_keys_initialized) and (not self.selected_trend_keys):
+            self.selected_trend_keys = self.numeric_telemetry_keys[:3]
+            self.trend_keys_initialized = True
+            self._rebuild_trend_key_rows()
+            self._rebuild_trend_line_rows()
+
+        self.dynamic_sample_index += 1
+        sample = {"t": self.dynamic_sample_index}
+
+        has_any_selected_metric = False
+        for key in self.selected_trend_keys:
+            value = self.telemetry.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                sample[key] = float(value)
+                has_any_selected_metric = True
+
+        sample["latency_ms"] = float(self.latency_ms)
+
+        if has_any_selected_metric:
+            self.dynamic_history.append(sample)
+            if len(self.dynamic_history) > self.dynamic_history_limit:
+                self.dynamic_history.pop(0)
+
+    def _reset_live_snapshot(self):
+        """Clear current live values to avoid stale UI while disconnected/reconnecting."""
+        self.telemetry = {}
+        self.telemetry_rows = []
+        self.numeric_telemetry_keys = []
+        self.sample_index = 0
+        self.device_version = ""
+        self.device_git_hash = ""
+        self.faults = []
+        self.last_seen_epoch = 0.0
+        self.telemetry_filter_text = ""
+        self.filtered_telemetry_rows = []
+        self.filtered_numeric_telemetry_keys = []
+        self.trend_key_rows = []
+        self.trend_line_rows = []
+
+    def _reset_trend_history(self):
+        """Clear the history for the telemetry trends"""
+        self.dynamic_history = []
+        self.dynamic_sample_index = 0
+        self.selected_trend_keys = []
+        self.filtered_telemetry_rows = []
+        self.filtered_numeric_telemetry_keys = []
+        self.trend_key_rows = []
+        self.trend_line_rows = []
+
+    def _rebuild_filtered_telemetry_rows(self):
+        """Filter telemetry rows by substring match on key or value."""
+        q = self.telemetry_filter_text.strip().lower()
+
+        if not q:
+            self.filtered_telemetry_rows = list(self.telemetry_rows)
+            return
+
+        self.filtered_telemetry_rows = [
+            row
+            for row in self.telemetry_rows
+            if q in str(row.get("key", "")).lower() or q in str(row.get("value", "")).lower()
+        ]
+
+    def _rebuild_telemetry_rows(self, raw: dict):
+        self.telemetry_rows = [
+            {"key": str(k), "value": str(v)}
+            for k, v in sorted(raw.items(), key=lambda kv: str(kv[0]))
+        ]
+        self._rebuild_filtered_telemetry_rows()
+
+    def _rebuild_filtered_numeric_telemetry_keys(self):
+        q = self.trend_filter_text.strip().lower()
+
+        if not q:
+            self.filtered_numeric_telemetry_keys = list(self.numeric_telemetry_keys)
+            return
+
+        self.filtered_numeric_telemetry_keys = [
+            key for key in self.numeric_telemetry_keys if q in key.lower()
+        ]
+
+        self._rebuild_trend_key_rows()
+
+    def _selected_trend_key_rows(self) -> list[dict]:
+        """Build UI rows for trend keys with selected state."""
+        selected = set(self.selected_trend_keys)
+        return [{"key": k, "selected": k in selected} for k in self.filtered_numeric_telemetry_keys]
+    
+    def _rebuild_trend_key_rows(self):
+        selected = set(self.selected_trend_keys)
+        self.trend_key_rows = [
+            {"key": k, "selected": k in selected}
+            for k in self.filtered_numeric_telemetry_keys
+        ]
+    
+    def _rebuild_trend_line_rows(self):
+        palette = ["#2563EB", "#0D9488", "#7C3AED", "#EA580C"]  # blue, teal, purple, orange
+        self.trend_line_rows = [
+            {"key": key, "color": palette[i % len(palette)]}
+            for i, key in enumerate(self.selected_trend_keys)
+        ]
 
     @rx.event(background=True)
     async def poll_loop(self):
-        async with self:
-            my_session = self.poll_session_id
-
         while True:
             async with self:
                 if not self.running:
@@ -295,79 +458,75 @@ class TelemetryState(rx.State):
 
             try:
                 raw, latency_ms = await asyncio.to_thread(fetch_status, ip, 1.0, "/status")
-                snapshot = parse_status(raw, latency_ms)
+                err = None
+            except Exception as e:
+                raw, latency_ms = None, None
+                err = e
 
-                async with self:
-                    if not self.running:
-                        break
+            async with self:
+                if not self.running:
+                    break
 
+                if err is None:
                     self.connected = True
                     self.last_error = ""
-                    self.last_seen_epoch = snapshot.timestamp
-                    self.latency_ms = snapshot.latency_ms
-                    self.consecutive_failures = 0
+                    self.latency_ms = round(latency_ms, 2)
 
-                    self.mode = snapshot.mode
-                    self.uptime_s = snapshot.uptime_s
-                    self.temp_c = snapshot.temp_c
-                    self.voltage_v = snapshot.voltage_v
-                    self.current_a = snapshot.current_a
-                    self.faults = snapshot.faults
-                    self.raw_json = json.dumps(snapshot.raw, indent=2)
+                    self.telemetry = raw
 
-                    # ---- append trend sample ----
-                    self.sample_index += 1
-                    self.history.append(
-                        {
-                            "t": self.sample_index,
-                            "temp_c": round(self.temp_c, 3),
-                            "voltage_v": round(self.voltage_v, 3),
-                            "current_a": round(self.current_a, 3),
-                            "latency_ms": round(self.latency_ms, 2),
-                        }
+                    version_val = raw.get("version", raw.get("fw_version", raw.get("sw_version")))
+                    git_hash_val = raw.get("git_hash", raw.get("git", raw.get("commit", raw.get("commit_hash"))))
+                    self.device_version = str(version_val) if version_val is not None else ""
+                    self.device_git_hash = str(git_hash_val) if git_hash_val is not None else ""
+
+                    self._rebuild_telemetry_rows(raw)
+                    self._rebuild_filtered_numeric_telemetry_keys()
+
+                    self.numeric_telemetry_keys = sorted(
+                        [
+                            str(k)
+                            for k, v in raw.items()
+                            if isinstance(v, (int, float)) and not isinstance(v, bool)
+                        ]
                     )
-                    if len(self.history) > self.history_limit:
-                        self.history = self.history[-self.history_limit:]
+
+                    self._append_dynamic_history_sample()
+
+                    faults_raw = (
+                        raw.get("faults")
+                        or raw.get("active_faults")
+                        or raw.get("alarms")
+                        or []
+                    )
+                    if isinstance(faults_raw, list):
+                        self.faults = [str(x) for x in faults_raw]
+                    else:
+                        self.faults = []
 
                     if self.log_to_file and self.log_file_path:
                         record = {
                             "ts_utc": datetime.now(timezone.utc).isoformat(),
-                            "device_ip": self.device_ip,
+                            "device_ip": self.device_address,
                             "sample_index": self.sample_index,
-                            "mode": self.mode,
-                            "uptime_s": self.uptime_s,
-                            "temp_c": round(self.temp_c, 3),
-                            "voltage_v": round(self.voltage_v, 3),
-                            "current_a": round(self.current_a, 3),
                             "latency_ms": round(self.latency_ms, 2),
-                            "faults": self.faults,
                             "connected": self.connected,
+                            "faults": self.faults,
+                            "telemetry": self.telemetry,
                         }
                         try:
                             self._append_jsonl_record(record)
                             self.log_samples_written += 1
                         except Exception as log_err:
-                            self.event_log.append(f"Log write error: {log_err}")
-                            if len(self.event_log) > 200:
-                                self.event_log = self.event_log[-200:]
-
-            except Exception as e:
-                async with self:
-                    if not self.running:
-                        break
-
+                            self._append_event_log(f"Log write error: {log_err}")
+                else:
                     self.connected = False
-                    self.consecutive_failures += 1
-                    self.last_error = str(e)
-                    self.event_log.append(f"Poll error ({self.consecutive_failures}): {e}")
-                    if len(self.event_log) > 200:
-                        self.event_log = self.event_log[-200:]
+                    self.last_error = str(err)
+                    self._append_event_log(self.last_error)
 
             await asyncio.sleep(interval_s)
 
     @rx.event(background=True)
     async def send_command_background(self, command_name: str, args_json: str = "{}"):
-        # mark busy + capture current IP
         async with self:
             if self.command_busy:
                 return
@@ -376,7 +535,6 @@ class TelemetryState(rx.State):
             self.last_command_name = command_name
             self.last_command_status = "Sending..."
 
-        # parse args JSON outside lock
         try:
             parsed_args = json.loads(args_json) if args_json.strip() else {}
             if not isinstance(parsed_args, dict):
@@ -386,12 +544,9 @@ class TelemetryState(rx.State):
                 self.command_busy = False
                 self.last_command_status = "Error"
                 self.last_command_response = f"Invalid args JSON: {e}"
-                self.event_log.append(f"Command '{command_name}' invalid args: {e}")
-                if len(self.event_log) > 200:
-                    self.event_log = self.event_log[-200:]
+                self._append_event_log(f"Command '{command_name}' invalid args: {e}")
             return
 
-        # send command in thread
         try:
             resp_json, latency_ms = await asyncio.to_thread(
                 send_command, ip, command_name, parsed_args, 2.0, "/command"
@@ -402,17 +557,13 @@ class TelemetryState(rx.State):
                 self.last_command_status = "Success"
                 self.last_command_latency_ms = round(latency_ms, 2)
                 self.last_command_response = json.dumps(resp_json, indent=2)
-                self.event_log.append(
+                self._append_event_log(
                     f"Command '{command_name}' OK ({self.last_command_latency_ms} ms)"
                 )
-                if len(self.event_log) > self.history_limit:
-                    self.event_log = self.event_log[-self.history_limit:]
 
         except Exception as e:
             async with self:
                 self.command_busy = False
                 self.last_command_status = "Error"
                 self.last_command_response = str(e)
-                self.event_log.append(f"Command '{command_name}' failed: {e}")
-                if len(self.event_log) > self.history_limit:
-                    self.event_log = self.event_log[-self.history_limit:]
+                self._append_event_log(f"Command '{command_name}' failed: {e}")

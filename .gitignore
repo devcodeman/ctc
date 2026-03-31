@@ -3,6 +3,7 @@
 assets/external/
 __pycache__/
 *.db
+.states
 .claude
 .venv
 uploaded_files**

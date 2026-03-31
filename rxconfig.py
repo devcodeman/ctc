@@ -1,9 +1,10 @@
 import reflex as rx
 
+from reflex.plugins.sitemap import SitemapPlugin
+
 config = rx.Config(
-    app_name="command_center",
-    plugins=[
-        rx.plugins.SitemapPlugin(),
-        rx.plugins.TailwindV4Plugin(),
-    ]
+    app_name="hermes",
+    frontend_port=3000,
+    backend_port=8000,
+    plugins=[SitemapPlugin()],
 )

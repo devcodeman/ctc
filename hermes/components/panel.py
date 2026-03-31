@@ -5,6 +5,7 @@ from hermes.utilities.constants import PANEL, BORDER
 
 
 def panel(*children, **kwargs) -> rx.Component:
+    """Wrap child content in the shared Hermes panel styling."""
     return rx.box(
         *children,
         background=PANEL,

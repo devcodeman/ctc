@@ -10,6 +10,7 @@ from hermes.components.ui_helpers import status_dot
 
 
 def _uploaded_plot_key_badge(key: str) -> rx.Component:
+    """Render a selectable telemetry channel badge for uploaded datasets."""
     selected = HermesState.uploaded_selected_keys.contains(key)
     return rx.button(
         key,
@@ -26,6 +27,7 @@ def _uploaded_plot_key_badge(key: str) -> rx.Component:
 
 
 def _header() -> rx.Component:
+    """Render the telemetry viewer page header."""
     return rx.hstack(
         rx.hstack(
             rx.link(
@@ -89,6 +91,7 @@ def _header() -> rx.Component:
 
 @rx.page(route="/telemetry", title="Hermes — Telemetry Viewer")
 def telemetry_page() -> rx.Component:
+    """Render the full-screen telemetry analysis page."""
     selected_telemetry_files = rx.selected_files("telemetry_file_upload")
     return rx.box(
         rx.html(

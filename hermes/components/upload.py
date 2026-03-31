@@ -11,6 +11,7 @@ from hermes.components.ui_helpers import section_title
 
 
 def upload_panel() -> rx.Component:
+    """Render the generic file staging panel for non-telemetry uploads."""
     selected_files = rx.selected_files("system_file_upload")
     return panel(
         rx.vstack(

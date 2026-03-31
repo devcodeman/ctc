@@ -8,6 +8,7 @@ from hermes.components.ui_helpers import section_title
 
 
 def export_panel() -> rx.Component:
+    """Render file-based export controls for rotated telemetry and event logs."""
     return panel(
         rx.vstack(
             section_title("Export"),

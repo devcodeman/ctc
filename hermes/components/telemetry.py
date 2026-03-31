@@ -10,6 +10,7 @@ from hermes.components.ui_helpers import section_title
 
 
 def telemetry_panel() -> rx.Component:
+    """Render the most recently received telemetry values."""
     return panel(
         rx.vstack(
             section_title("Last Telemetry"),
@@ -50,6 +51,7 @@ def telemetry_panel() -> rx.Component:
     )
 
 def plot_key_badge(key: str) -> rx.Component:
+    """Render a selectable telemetry key chip for preview plotting."""
     selected = HermesState.selected_keys.contains(key)
     return rx.button(
         key,
@@ -66,6 +68,7 @@ def plot_key_badge(key: str) -> rx.Component:
 
 
 def telemetry_preview_panel() -> rx.Component:
+    """Render the live telemetry preview plot and channel selector."""
     return panel(
         rx.vstack(
             rx.hstack(

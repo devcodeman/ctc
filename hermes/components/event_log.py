@@ -8,6 +8,7 @@ from hermes.components.ui_helpers import section_title
 
 
 def event_entry(entry: str) -> rx.Component:
+    """Render a single event log line with severity-aware coloring."""
     color = rx.cond(
         entry.contains("] ERROR:"),
         DANGER,
@@ -30,6 +31,7 @@ def event_entry(entry: str) -> rx.Component:
 
 
 def event_log_panel() -> rx.Component:
+    """Render the event log viewer panel."""
     return panel(
         rx.vstack(
             section_title("Event Log"),

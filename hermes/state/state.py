@@ -21,6 +21,7 @@ import plotly.graph_objects as go
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def utc_stamp() -> str:
+    """Return a UTC timestamp string suitable for filenames and log entries."""
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d-%H-%M-%S")
 
 LOG_DIR = pathlib.Path("/tmp/hermes/logs")
@@ -41,6 +42,7 @@ _LOG_FILE_INDEX = {
 
 @lru_cache(maxsize=1)
 def system_memory_bytes() -> int:
+    """Return the total system memory in bytes, with a conservative fallback."""
     try:
         page_size = os.sysconf("SC_PAGE_SIZE")
         page_count = os.sysconf("SC_PHYS_PAGES")
@@ -51,16 +53,19 @@ def system_memory_bytes() -> int:
 
 @lru_cache(maxsize=1)
 def log_rotation_threshold_bytes() -> int:
+    """Return the maximum size allowed for a single rotated log file."""
     return max(1, system_memory_bytes() // 2)
 
 
 def log_path(log_type: str, index: int) -> pathlib.Path:
+    """Build the rotated file path for the given log type and part index."""
     directory = TELEMETRY_DIR if log_type == "telemetry" else LOG_DIR
     prefix = "hermes_telemetry" if log_type == "telemetry" else "hermes_events"
     return directory / f"{prefix}_{_SESSION_STAMP}_part{index:03d}.jsonl"
 
 
 def active_log_path(log_type: str, incoming_size: int = 0) -> pathlib.Path:
+    """Return the active log file path, rotating first if the next write would overflow it."""
     current_path = _LOG_PATHS[log_type]
     if current_path.exists() and (current_path.stat().st_size + incoming_size) > log_rotation_threshold_bytes():
         _LOG_FILE_INDEX[log_type] += 1
@@ -70,6 +75,7 @@ def active_log_path(log_type: str, incoming_size: int = 0) -> pathlib.Path:
 
 
 def append_jsonl(log_type: str, record: dict):
+    """Append a JSONL record to the active rotated log file for the given log type."""
     record_size = len(json.dumps(record).encode("utf-8")) + 1
     path = active_log_path(log_type, incoming_size=record_size)
     with jsonlines.open(str(path), mode="a") as w:
@@ -78,12 +84,14 @@ def append_jsonl(log_type: str, record: dict):
 
 @lru_cache(maxsize=1)
 def telemetry_schema() -> dict[str, Any]:
+    """Load and cache the telemetry file validation schema."""
     schema_path = pathlib.Path(__file__).resolve().parents[1] / "schemas" / "telemetry_file.schema.json"
     with schema_path.open("r", encoding="utf-8") as schema_file:
         return json.load(schema_file)
 
 
 def parse_json_or_jsonl(raw: bytes, filename: str) -> Any:
+    """Parse telemetry upload content from either JSON or JSONL."""
     suffix = pathlib.Path(filename).suffix.lower()
     text = raw.decode("utf-8")
     if suffix == ".jsonl":
@@ -101,6 +109,7 @@ def parse_json_or_jsonl(raw: bytes, filename: str) -> Any:
 
 
 def validate_telemetry_dataset(payload: Any) -> tuple[list[dict[str, Any]], list[str]]:
+    """Validate and normalize telemetry upload content for plotting."""
     try:
         Draft202012Validator(telemetry_schema()).validate(payload)
     except ValidationError as exc:
@@ -147,6 +156,7 @@ def validate_telemetry_dataset(payload: Any) -> tuple[list[dict[str, Any]], list
 # ── state ─────────────────────────────────────────────────────────────────────
 
 class HermesState(rx.State):
+    """Application state for connections, telemetry, uploads, plotting, and exports."""
     # Connection
     conn_mode: str = "ip"          # "ip" | "serial"
     ip_address: str = "127.0.0.1"
@@ -189,6 +199,7 @@ class HermesState(rx.State):
     # ── logging ────────────────────────────────────────────────────────────
 
     def _log_event(self, message: str, level: str = "INFO"):
+        """Append a formatted event entry to the UI list and rotated event log."""
         stamp = utc_stamp()
         normalized_level = level.upper()
         entry = {"timestamp": stamp, "level": normalized_level, "message": message}
@@ -196,15 +207,19 @@ class HermesState(rx.State):
         append_jsonl("events", entry)
 
     def _log_info(self, message: str):
+        """Record an informational event."""
         self._log_event(message, level="INFO")
 
     def _log_warning(self, message: str):
+        """Record a warning event."""
         self._log_event(message, level="WARNING")
 
     def _log_error(self, message: str):
+        """Record an error event."""
         self._log_event(message, level="ERROR")
 
     def _ingest_telemetry(self, data: dict):
+        """Store incoming telemetry in UI state, history, and the rotated telemetry log."""
         stamp = utc_stamp()
         record = {"timestamp": stamp, **data}
         self.last_telemetry = data
@@ -218,21 +233,27 @@ class HermesState(rx.State):
     # ── connection ─────────────────────────────────────────────────────────
 
     def set_conn_mode(self, mode: str):
+        """Set the active connection mode."""
         self.conn_mode = mode
 
     def set_ip_address(self, v: str):
+        """Update the configured IP address."""
         self.ip_address = v
 
     def set_ip_port(self, v: str):
+        """Update the configured IP port."""
         self.ip_port = v
 
     def set_poll_interval(self, v: str):
+        """Update the telemetry polling interval."""
         self.poll_interval = v
 
     def set_serial_port(self, v: str):
+        """Update the configured serial device path."""
         self.serial_port = v
 
     def connect(self):
+        """Start the selected telemetry connection and its background reader thread."""
         if self.connected:
             return
         self._stop_polling = False
@@ -251,6 +272,7 @@ class HermesState(rx.State):
         self._poll_thread_active = True
 
     def disconnect(self):
+        """Stop the active telemetry connection."""
         self._stop_polling = True
         self.connected = False
         self._poll_thread_active = False
@@ -259,6 +281,7 @@ class HermesState(rx.State):
     # ── background loops (run in threads) ─────────────────────────────────
 
     def _ip_poll_loop(self):
+        """Poll the configured IP telemetry endpoint until disconnected."""
         interval = max(0.1, float(self.poll_interval or "1"))
         url = f"http://{self.ip_address}:{self.ip_port}/status"
         while not self._stop_polling:
@@ -272,6 +295,7 @@ class HermesState(rx.State):
             time.sleep(interval)
 
     def _serial_read_loop(self):
+        """Read JSON telemetry lines from the configured serial device until disconnected."""
         try:
             ser = serial.Serial(self.serial_port, 115200, timeout=2)
             asyncio.run(self._async_log_info(f"Serial connection opened on {self.serial_port}"))
@@ -288,15 +312,19 @@ class HermesState(rx.State):
             asyncio.run(self._async_log_error(f"Serial error: {e}"))
 
     async def _async_ingest(self, data: dict):
+        """Bridge threaded telemetry ingestion into state mutation."""
         self._ingest_telemetry(data)
 
     async def _async_log_info(self, msg: str):
+        """Bridge threaded informational logging into state mutation."""
         self._log_info(msg)
 
     async def _async_log_warning(self, msg: str):
+        """Bridge threaded warning logging into state mutation."""
         self._log_warning(msg)
 
     async def _async_log_error(self, msg: str):
+        """Bridge threaded error logging into state mutation."""
         self._log_error(msg)
 
     # ── refresh ticks ─────────────────────────────────────────────────────
@@ -312,12 +340,14 @@ class HermesState(rx.State):
     # ── plot key selection ─────────────────────────────────────────────────
 
     def toggle_plot_key(self, key: str):
+        """Toggle a live telemetry key in the dashboard preview plot selection."""
         if key in self.selected_keys:
             self.selected_keys = [k for k in self.selected_keys if k != key]
         elif len(self.selected_keys) < 4:
             self.selected_keys = self.selected_keys + [key]
 
     def toggle_uploaded_plot_key(self, key: str):
+        """Toggle a telemetry key in the uploaded-file analysis plot selection."""
         if key in self.uploaded_selected_keys:
             self.uploaded_selected_keys = [k for k in self.uploaded_selected_keys if k != key]
         elif len(self.uploaded_selected_keys) < 4:
@@ -326,12 +356,15 @@ class HermesState(rx.State):
     # ── export ────────────────────────────────────────────────────────────
 
     def set_selected_telemetry_log_file(self, value: str):
+        """Store the selected telemetry log filename for export."""
         self.selected_telemetry_log_file = value
 
     def set_selected_event_log_file(self, value: str):
+        """Store the selected event log filename for export."""
         self.selected_event_log_file = value
 
     def export_selected_telemetry_log_file(self):
+        """Download the selected rotated telemetry log file."""
         file_name = self.active_selected_telemetry_log_file
         if not file_name:
             self._log_warning("No telemetry log file selected for export")
@@ -344,6 +377,7 @@ class HermesState(rx.State):
         return rx.download(data=path.read_text(encoding="utf-8"), filename=file_name)
 
     def export_selected_event_log_file(self):
+        """Download the selected rotated event log file."""
         file_name = self.active_selected_event_log_file
         if not file_name:
             self._log_warning("No event log file selected for export")
@@ -358,6 +392,7 @@ class HermesState(rx.State):
     # ── file upload / parse ───────────────────────────────────────────────
 
     async def handle_upload(self, files: list[rx.UploadFile]):
+        """Stage a generic file upload for later non-telemetry workflows."""
         for file in files:
             data = await file.read()
             self.uploaded_file_name = file.filename
@@ -366,12 +401,14 @@ class HermesState(rx.State):
             self._log_info(f"Staged generic upload file {file.filename}")
 
     def clear_staged_upload(self):
+        """Clear the currently staged generic upload."""
         self.upload_status = ""
         self.uploaded_file_name = ""
         self.uploaded_file_size = 0
         self._log_info("Cleared staged generic upload file")
 
     async def handle_telemetry_upload(self, files: list[rx.UploadFile]):
+        """Validate and load an uploaded telemetry analysis file."""
         for file in files:
             data = await file.read()
             self.telemetry_upload_name = file.filename
@@ -391,6 +428,7 @@ class HermesState(rx.State):
                 self._log_error(f"Telemetry file parse error for {file.filename}: {e}")
 
     def clear_telemetry_upload(self):
+        """Clear the loaded telemetry analysis dataset and related UI state."""
         self.telemetry_upload_status = ""
         self.telemetry_upload_name = ""
         self.uploaded_telemetry_data = []
@@ -409,6 +447,7 @@ class HermesState(rx.State):
 
     @rx.var
     def last_telemetry_items(self) -> list[tuple[str, str]]:
+        """Return the latest telemetry sample as stringified key-value pairs."""
         return [(k, str(v)) for k, v in self.last_telemetry.items()]
 
     @rx.var
@@ -448,10 +487,12 @@ class HermesState(rx.State):
 
     @rx.var
     def uploaded_telemetry_rows(self) -> list[dict[str, Any]]:
+        """Expose the normalized uploaded telemetry records for plotting."""
         return self.uploaded_telemetry_data
 
     @rx.var
     def telemetry_log_files(self) -> list[str]:
+        """List available rotated telemetry log files, newest first."""
         return sorted(
             [path.name for path in TELEMETRY_DIR.glob("hermes_telemetry_*.jsonl")],
             reverse=True,
@@ -459,6 +500,7 @@ class HermesState(rx.State):
 
     @rx.var
     def event_log_files(self) -> list[str]:
+        """List available rotated event log files, newest first."""
         return sorted(
             [path.name for path in LOG_DIR.glob("hermes_events_*.jsonl")],
             reverse=True,
@@ -466,18 +508,21 @@ class HermesState(rx.State):
 
     @rx.var
     def active_selected_telemetry_log_file(self) -> str:
+        """Return the currently selected telemetry log file or the newest available file."""
         if self.selected_telemetry_log_file in self.telemetry_log_files:
             return self.selected_telemetry_log_file
         return self.telemetry_log_files[0] if self.telemetry_log_files else ""
 
     @rx.var
     def active_selected_event_log_file(self) -> str:
+        """Return the currently selected event log file or the newest available file."""
         if self.selected_event_log_file in self.event_log_files:
             return self.selected_event_log_file
         return self.event_log_files[0] if self.event_log_files else ""
 
     @rx.var
     def uploaded_telemetry_keys(self) -> list[str]:
+        """Return distinct plottable keys from the uploaded telemetry dataset."""
         keys: list[str] = []
         for row in self.uploaded_telemetry_rows:
             for key in row:
@@ -487,6 +532,7 @@ class HermesState(rx.State):
 
     @rx.var
     def uploaded_plot_figure(self) -> go.Figure:
+        """Build a Plotly figure from the uploaded telemetry analysis dataset."""
         fig = go.Figure()
         fig.update_layout(
             paper_bgcolor="#111820",

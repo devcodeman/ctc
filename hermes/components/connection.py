@@ -11,6 +11,7 @@ from hermes.components.ui_helpers import label, section_title, status_dot
 
 
 def connection_panel() -> rx.Component:
+    """Render the connection controls for IP and serial device links."""
     return panel(
         rx.vstack(
             section_title("Connection"),

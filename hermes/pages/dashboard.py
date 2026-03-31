@@ -16,6 +16,7 @@ from hermes.components.event_log import event_log_panel
 
 @lru_cache(maxsize=1)
 def app_version() -> str:
+    """Read and cache the application version from ``pyproject.toml``."""
     pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
     with pyproject_path.open("rb") as pyproject_file:
         project = tomllib.load(pyproject_file)["project"]
@@ -23,6 +24,7 @@ def app_version() -> str:
 
 
 def footer() -> rx.Component:
+    """Render the dashboard footer with the current application version."""
     return rx.hstack(
         rx.text(
             f"v{app_version()}",
@@ -38,6 +40,7 @@ def footer() -> rx.Component:
     )
 
 def header() -> rx.Component:
+    """Render the dashboard header and project branding."""
     return rx.hstack(
         rx.hstack(
             rx.image(
@@ -77,6 +80,7 @@ def header() -> rx.Component:
 
 @rx.page(route="/", title="Hermes")
 def index() -> rx.Component:
+    """Render the main Hermes dashboard page."""
     return rx.vstack(
         # Google Fonts
         rx.html(

@@ -5,6 +5,7 @@ from hermes.utilities.constants import ACCENT, MUTED, SUCCESS, DANGER, FONT_DISP
 
 
 def label(text: str) -> rx.Component:
+    """Render a consistent form label."""
     return rx.text(
         text,
         font_family=FONT_DISPLAY,
@@ -18,6 +19,7 @@ def label(text: str) -> rx.Component:
 
 
 def section_title(text: str) -> rx.Component:
+    """Render a shared panel section heading."""
     return rx.hstack(
         rx.box(width="4px", height="1.2rem", background=ACCENT, border_radius="2px"),
         rx.text(
@@ -36,6 +38,7 @@ def section_title(text: str) -> rx.Component:
 
 
 def status_dot(active) -> rx.Component:
+    """Render a connection status indicator dot."""
     return rx.box(
         width="10px",
         height="10px",

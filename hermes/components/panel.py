@@ -9,7 +9,7 @@ def panel(*children, **kwargs) -> rx.Component:
         *children,
         background=PANEL,
         border=f"1px solid {BORDER}",
-        border_radius="6px",
-        padding="1.25rem",
+        border_radius="8px",
+        padding="1.5rem",
         **kwargs,
     )

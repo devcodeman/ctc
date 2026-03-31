@@ -1,4 +1,4 @@
-"""Telemetry plot page – full-screen plotting view."""
+"""Telemetry viewer page – full-screen plotting view."""
 
 import reflex as rx
 from hermes.state import HermesState
@@ -6,14 +6,14 @@ from hermes.utilities.constants import (
     BG, PANEL, BORDER, ACCENT, ACCENT2, TEXT, MUTED,
     FONT_MONO, FONT_DISPLAY,
 )
-from hermes.components.ui_helpers import section_title, status_dot
+from hermes.components.ui_helpers import status_dot
 
 
-def _plot_key_badge(key: str) -> rx.Component:
-    selected = HermesState.selected_keys.contains(key)
+def _uploaded_plot_key_badge(key: str) -> rx.Component:
+    selected = HermesState.uploaded_selected_keys.contains(key)
     return rx.button(
         key,
-        on_click=HermesState.toggle_plot_key(key),
+        on_click=HermesState.toggle_uploaded_plot_key(key),
         background=rx.cond(selected, ACCENT2, "transparent"),
         color=rx.cond(selected, BG, TEXT),
         border=rx.cond(selected, f"1px solid {ACCENT2}", f"1px solid {BORDER}"),
@@ -56,7 +56,7 @@ def _header() -> rx.Component:
                 margin_x="1rem",
             ),
             rx.text(
-                "TELEMETRY PLOT",
+                "TELEMETRY VIEWER",
                 font_family=FONT_DISPLAY,
                 font_size="1.1rem",
                 font_weight="700",
@@ -87,8 +87,9 @@ def _header() -> rx.Component:
     )
 
 
-@rx.page(route="/telemetry", title="Hermes — Telemetry Plot")
+@rx.page(route="/telemetry", title="Hermes — Telemetry Viewer")
 def telemetry_page() -> rx.Component:
+    selected_telemetry_files = rx.selected_files("telemetry_file_upload")
     return rx.box(
         rx.html(
             '<link rel="preconnect" href="https://fonts.googleapis.com">'
@@ -96,37 +97,198 @@ def telemetry_page() -> rx.Component:
             '<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">'
         ),
         _header(),
-        # Hidden timer: triggers state refresh every 5 seconds
         rx.moment(interval=HermesState.poll_interval_ms, on_change=HermesState.tick, display="none"),
-        rx.moment(interval=5000, on_change=HermesState.refresh_plot, display="none"),
         rx.vstack(
-            # Key selector bar
-            rx.hstack(
-                rx.text(
-                    "DATA CHANNELS",
-                    font_family=FONT_DISPLAY,
-                    font_size="0.7rem",
-                    font_weight="600",
-                    letter_spacing="0.12em",
-                    color=MUTED,
+            rx.vstack(
+                rx.hstack(
+                    rx.text(
+                        "TELEMETRY ANALYSIS FILE",
+                        font_family=FONT_DISPLAY,
+                        font_size="0.7rem",
+                        font_weight="600",
+                        letter_spacing="0.12em",
+                        color=MUTED,
+                    ),
+                    rx.text(
+                        "Accepts .json and .jsonl files that match the telemetry schema.",
+                        color=MUTED,
+                        font_size="0.78rem",
+                        font_family=FONT_MONO,
+                    ),
+                    align="center",
+                    justify="between",
+                    width="100%",
+                ),
+                rx.upload(
+                    rx.vstack(
+                        rx.text(
+                            "Drop telemetry JSON/JSONL here or click to browse",
+                            color=MUTED,
+                            font_family=FONT_MONO,
+                            font_size="0.88rem",
+                            text_align="center",
+                        ),
+                        rx.text(
+                            "Schema: timestamp plus at least one numeric telemetry field per record.",
+                            color=MUTED,
+                            font_family=FONT_MONO,
+                            font_size="0.76rem",
+                            text_align="center",
+                        ),
+                        align="center",
+                        gap="0.35rem",
+                    ),
+                    id="telemetry_file_upload",
+                    accept={
+                        ".json": "application/json",
+                        ".jsonl": "application/x-ndjson",
+                    },
+                    multiple=False,
+                    border=f"1px dashed {BORDER}",
+                    border_radius="6px",
+                    padding="1.25rem",
+                    width="100%",
+                    background=BG,
+                    cursor="pointer",
                 ),
                 rx.cond(
-                    HermesState.telemetry_keys.length() == 0,
-                    rx.text(
-                        "— no keys available (connect to a device first)",
+                    selected_telemetry_files.length() > 0,
+                    rx.box(
+                        rx.vstack(
+                            rx.text(
+                                "Selected for analysis",
+                                color=ACCENT,
+                                font_family=FONT_DISPLAY,
+                                font_size="0.74rem",
+                                font_weight="600",
+                                letter_spacing="0.08em",
+                            ),
+                            rx.foreach(
+                                selected_telemetry_files,
+                                lambda file_name: rx.text(
+                                    file_name,
+                                    font_family=FONT_MONO,
+                                    font_size="0.84rem",
+                                    color=TEXT,
+                                ),
+                            ),
+                            align="start",
+                            gap="0.35rem",
+                        ),
+                        background=BG,
+                        border=f"1px solid {ACCENT}",
+                        border_radius="4px",
+                        padding="0.95rem",
+                        width="100%",
+                    ),
+                    rx.box(),
+                ),
+                rx.hstack(
+                    rx.button(
+                        "Load Telemetry File",
+                        on_click=HermesState.handle_telemetry_upload(
+                            rx.upload_files(upload_id="telemetry_file_upload")
+                        ),
+                        background="transparent",
+                        color=ACCENT,
+                        border=f"1px solid {ACCENT}",
+                        border_radius="4px",
+                        font_family=FONT_DISPLAY,
+                        font_size="0.82rem",
+                        font_weight="600",
+                        letter_spacing="0.08em",
+                        cursor="pointer",
+                        padding="0.5rem 0.95rem",
+                    ),
+                    rx.button(
+                        "Clear File",
+                        on_click=[
+                            HermesState.clear_telemetry_upload,
+                            rx.clear_selected_files("telemetry_file_upload"),
+                        ],
+                        background="transparent",
                         color=MUTED,
-                        font_size="0.72rem",
+                        border=f"1px solid {BORDER}",
+                        border_radius="4px",
+                        font_family=FONT_DISPLAY,
+                        font_size="0.82rem",
+                        font_weight="600",
+                        letter_spacing="0.08em",
+                        cursor="pointer",
+                        padding="0.5rem 0.95rem",
+                    ),
+                    rx.cond(
+                        HermesState.telemetry_upload_name != "",
+                        rx.text(
+                            HermesState.telemetry_upload_name,
+                            color=MUTED,
+                            font_size="0.76rem",
+                            font_family=FONT_MONO,
+                        ),
+                        rx.box(),
+                    ),
+                    align="center",
+                    gap="0.75rem",
+                    width="100%",
+                ),
+                rx.cond(
+                    HermesState.telemetry_upload_status != "",
+                    rx.text(
+                        HermesState.telemetry_upload_status,
+                        color=rx.cond(
+                            HermesState.telemetry_upload_status.contains("error"),
+                            "#ffab00",
+                            ACCENT,
+                        ),
+                        font_size="0.8rem",
+                        font_family=FONT_MONO,
+                    ),
+                    rx.box(),
+                ),
+                gap="0.75rem",
+                padding="0.9rem 1.25rem",
+                background=PANEL,
+                border=f"1px solid {BORDER}",
+                border_radius="6px",
+                width="100%",
+            ),
+            # Key selector bar
+            rx.vstack(
+                rx.hstack(
+                    rx.text(
+                        "FILE DATA CHANNELS",
+                        font_family=FONT_DISPLAY,
+                        font_size="0.7rem",
+                        font_weight="600",
+                        letter_spacing="0.12em",
+                        color=MUTED,
+                    ),
+                    rx.text(
+                        "Full view uses uploaded telemetry files only.",
+                        color=MUTED,
+                        font_size="0.78rem",
+                        font_family=FONT_MONO,
+                    ),
+                    align="center",
+                    justify="between",
+                    width="100%",
+                ),
+                rx.cond(
+                    HermesState.uploaded_telemetry_keys.length() == 0,
+                    rx.text(
+                        "Upload a telemetry JSON or JSONL file above to analyze it here.",
+                        color=MUTED,
+                        font_size="0.8rem",
                         font_family=FONT_MONO,
                     ),
                     rx.flex(
-                        rx.foreach(HermesState.telemetry_keys, _plot_key_badge),
+                        rx.foreach(HermesState.uploaded_telemetry_keys, _uploaded_plot_key_badge),
                         flex_wrap="wrap",
                         gap="0.4rem",
                     ),
                 ),
-                align="center",
-                gap="1rem",
-                padding="0.75rem 1.25rem",
+                gap="0.75rem",
+                padding="0.9rem 1.25rem",
                 background=PANEL,
                 border=f"1px solid {BORDER}",
                 border_radius="6px",
@@ -134,10 +296,10 @@ def telemetry_page() -> rx.Component:
             ),
             # Full-height plot
             rx.cond(
-                HermesState.selected_keys.length() > 0,
+                HermesState.uploaded_selected_keys.length() > 0,
                 rx.box(
                     rx.plotly(
-                        data=HermesState.plot_figure,
+                        data=HermesState.uploaded_plot_figure,
                         width="100%",
                         height="100%",
                     ),
@@ -152,7 +314,11 @@ def telemetry_page() -> rx.Component:
                 rx.box(
                     rx.vstack(
                         rx.text(
-                            "SELECT DATA CHANNELS ABOVE TO BEGIN PLOTTING",
+                            rx.cond(
+                                HermesState.uploaded_telemetry_keys.length() > 0,
+                                "SELECT FILE DATA CHANNELS ABOVE TO BEGIN PLOTTING",
+                                "UPLOAD A TELEMETRY FILE ABOVE TO BEGIN ANALYSIS",
+                            ),
                             font_family=FONT_DISPLAY,
                             font_size="0.85rem",
                             font_weight="600",

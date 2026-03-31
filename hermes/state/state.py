@@ -10,7 +10,11 @@ import threading
 import time
 import datetime
 import pathlib
+import os
+from functools import lru_cache
 from typing import Any
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import ValidationError
 import plotly.graph_objects as go
 
 
@@ -25,13 +29,119 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 TELEMETRY_DIR.mkdir(parents=True, exist_ok=True)
 
 _SESSION_STAMP = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
-TELEMETRY_LOG = TELEMETRY_DIR / f"hermes_telemetry_{_SESSION_STAMP}.jsonl"
-EVENT_LOG = LOG_DIR / f"hermes_events_{_SESSION_STAMP}.jsonl"
+_LOG_PATHS = {
+    "telemetry": TELEMETRY_DIR / f"hermes_telemetry_{_SESSION_STAMP}_part000.jsonl",
+    "events": LOG_DIR / f"hermes_events_{_SESSION_STAMP}_part000.jsonl",
+}
+_LOG_FILE_INDEX = {
+    "telemetry": 0,
+    "events": 0,
+}
 
 
-def append_jsonl(path: pathlib.Path, record: dict):
+@lru_cache(maxsize=1)
+def system_memory_bytes() -> int:
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        page_count = os.sysconf("SC_PHYS_PAGES")
+        return int(page_size * page_count)
+    except (ValueError, OSError, AttributeError):
+        return 1024 * 1024 * 1024
+
+
+@lru_cache(maxsize=1)
+def log_rotation_threshold_bytes() -> int:
+    return max(1, system_memory_bytes() // 2)
+
+
+def log_path(log_type: str, index: int) -> pathlib.Path:
+    directory = TELEMETRY_DIR if log_type == "telemetry" else LOG_DIR
+    prefix = "hermes_telemetry" if log_type == "telemetry" else "hermes_events"
+    return directory / f"{prefix}_{_SESSION_STAMP}_part{index:03d}.jsonl"
+
+
+def active_log_path(log_type: str, incoming_size: int = 0) -> pathlib.Path:
+    current_path = _LOG_PATHS[log_type]
+    if current_path.exists() and (current_path.stat().st_size + incoming_size) > log_rotation_threshold_bytes():
+        _LOG_FILE_INDEX[log_type] += 1
+        current_path = log_path(log_type, _LOG_FILE_INDEX[log_type])
+        _LOG_PATHS[log_type] = current_path
+    return current_path
+
+
+def append_jsonl(log_type: str, record: dict):
+    record_size = len(json.dumps(record).encode("utf-8")) + 1
+    path = active_log_path(log_type, incoming_size=record_size)
     with jsonlines.open(str(path), mode="a") as w:
         w.write(record)
+
+
+@lru_cache(maxsize=1)
+def telemetry_schema() -> dict[str, Any]:
+    schema_path = pathlib.Path(__file__).resolve().parents[1] / "schemas" / "telemetry_file.schema.json"
+    with schema_path.open("r", encoding="utf-8") as schema_file:
+        return json.load(schema_file)
+
+
+def parse_json_or_jsonl(raw: bytes, filename: str) -> Any:
+    suffix = pathlib.Path(filename).suffix.lower()
+    text = raw.decode("utf-8")
+    if suffix == ".jsonl":
+        rows = []
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                rows.append(json.loads(stripped))
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSONL on line {line_number}: {exc.msg}") from exc
+        return rows
+    return json.loads(text)
+
+
+def validate_telemetry_dataset(payload: Any) -> tuple[list[dict[str, Any]], list[str]]:
+    try:
+        Draft202012Validator(telemetry_schema()).validate(payload)
+    except ValidationError as exc:
+        path = " -> ".join(str(part) for part in exc.absolute_path)
+        if path:
+            raise ValueError(f"Schema validation failed at {path}: {exc.message}") from exc
+        raise ValueError(f"Schema validation failed: {exc.message}") from exc
+
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, dict):
+        for key in ("telemetry_history", "telemetry", "records", "data"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                rows = value
+                break
+        else:
+            raise ValueError(
+                "Telemetry files must be a JSON array of records or an object containing "
+                "a records/data/telemetry/telemetry_history array."
+            )
+    else:
+        raise ValueError("Telemetry files must contain JSON objects.")
+
+    if not rows:
+        raise ValueError("Telemetry file contains no records.")
+
+    normalized_rows: list[dict[str, Any]] = []
+    telemetry_keys: list[str] = []
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            raise ValueError(f"Record {index} must be a JSON object.")
+        sample_keys = [key for key in row.keys() if key != "timestamp"]
+        has_numeric_value = any(isinstance(row[key], (int, float)) for key in sample_keys)
+        if not has_numeric_value:
+            raise ValueError(f"Record {index} must include at least one numeric telemetry value.")
+        normalized_rows.append(row)
+        for key in sample_keys:
+            if key not in telemetry_keys:
+                telemetry_keys.append(key)
+    return normalized_rows, telemetry_keys
 
 
 # ── state ─────────────────────────────────────────────────────────────────────
@@ -53,13 +163,24 @@ class HermesState(rx.State):
     # Plot
     selected_keys: list[str] = []        # up to 4
     plot_history_snapshot: list[dict] = []  # refreshed every 5s for plot
+    uploaded_selected_keys: list[str] = []   # up to 4 for uploaded telemetry analysis
 
     # Log (UI)
     event_log: list[str] = []
 
-    # File upload / parse
-    uploaded_json: dict = {}
+    # Generic dashboard file upload
     upload_status: str = ""
+    uploaded_file_name: str = ""
+    uploaded_file_size: int = 0
+
+    # Export selections
+    selected_telemetry_log_file: str = ""
+    selected_event_log_file: str = ""
+
+    # Telemetry analysis file upload
+    telemetry_upload_status: str = ""
+    telemetry_upload_name: str = ""
+    uploaded_telemetry_data: list[dict[str, Any]] = []
 
     # Internal: stop flag stored in backend var
     _stop_polling: bool = False
@@ -67,11 +188,21 @@ class HermesState(rx.State):
 
     # ── logging ────────────────────────────────────────────────────────────
 
-    def _log_event(self, message: str):
+    def _log_event(self, message: str, level: str = "INFO"):
         stamp = utc_stamp()
-        entry = {"timestamp": stamp, "message": message}
-        self.event_log = [f"[{stamp}] {message}"] + self.event_log[:199]
-        append_jsonl(EVENT_LOG, entry)
+        normalized_level = level.upper()
+        entry = {"timestamp": stamp, "level": normalized_level, "message": message}
+        self.event_log = [f"[{stamp}] {normalized_level}: {message}"] + self.event_log[:199]
+        append_jsonl("events", entry)
+
+    def _log_info(self, message: str):
+        self._log_event(message, level="INFO")
+
+    def _log_warning(self, message: str):
+        self._log_event(message, level="WARNING")
+
+    def _log_error(self, message: str):
+        self._log_event(message, level="ERROR")
 
     def _ingest_telemetry(self, data: dict):
         stamp = utc_stamp()
@@ -82,8 +213,7 @@ class HermesState(rx.State):
         for k in data:
             if k not in self.telemetry_keys:
                 self.telemetry_keys = self.telemetry_keys + [k]
-        append_jsonl(TELEMETRY_LOG, record)
-        self._log_event(f"Telemetry: {json.dumps(data)}")
+        append_jsonl("telemetry", record)
 
     # ── connection ─────────────────────────────────────────────────────────
 
@@ -107,14 +237,14 @@ class HermesState(rx.State):
             return
         self._stop_polling = False
         if self.conn_mode == "ip":
-            self._log_event(
-                f"Connecting via IP {self.ip_address}:{self.ip_port} "
-                f"@ {self.poll_interval}s interval"
+            self._log_info(
+                f"Connected via IP {self.ip_address}:{self.ip_port} "
+                f"at {self.poll_interval}s interval"
             )
             t = threading.Thread(target=self._ip_poll_loop, daemon=True)
             t.start()
         else:
-            self._log_event(f"Connecting via Serial {self.serial_port} @ 115200")
+            self._log_info(f"Connected via serial {self.serial_port} at 115200 baud")
             t = threading.Thread(target=self._serial_read_loop, daemon=True)
             t.start()
         self.connected = True
@@ -124,7 +254,7 @@ class HermesState(rx.State):
         self._stop_polling = True
         self.connected = False
         self._poll_thread_active = False
-        self._log_event("Disconnected")
+        self._log_info("Disconnected")
 
     # ── background loops (run in threads) ─────────────────────────────────
 
@@ -138,13 +268,13 @@ class HermesState(rx.State):
                 data = resp.json()
                 asyncio.run(self._async_ingest(data))
             except Exception as e:
-                asyncio.run(self._async_log(f"IP poll error: {e}"))
+                asyncio.run(self._async_log_error(f"IP poll error: {e}"))
             time.sleep(interval)
 
     def _serial_read_loop(self):
         try:
             ser = serial.Serial(self.serial_port, 115200, timeout=2)
-            asyncio.run(self._async_log(f"Serial opened: {self.serial_port}"))
+            asyncio.run(self._async_log_info(f"Serial connection opened on {self.serial_port}"))
             while not self._stop_polling:
                 line = ser.readline().decode(errors="replace").strip()
                 if line:
@@ -152,16 +282,22 @@ class HermesState(rx.State):
                         data = json.loads(line)
                         asyncio.run(self._async_ingest(data))
                     except json.JSONDecodeError:
-                        asyncio.run(self._async_log(f"Serial non-JSON: {line}"))
+                        asyncio.run(self._async_log_warning("Received non-JSON serial data"))
             ser.close()
         except Exception as e:
-            asyncio.run(self._async_log(f"Serial error: {e}"))
+            asyncio.run(self._async_log_error(f"Serial error: {e}"))
 
     async def _async_ingest(self, data: dict):
         self._ingest_telemetry(data)
 
-    async def _async_log(self, msg: str):
-        self._log_event(msg)
+    async def _async_log_info(self, msg: str):
+        self._log_info(msg)
+
+    async def _async_log_warning(self, msg: str):
+        self._log_warning(msg)
+
+    async def _async_log_error(self, msg: str):
+        self._log_error(msg)
 
     # ── refresh ticks ─────────────────────────────────────────────────────
 
@@ -181,27 +317,85 @@ class HermesState(rx.State):
         elif len(self.selected_keys) < 4:
             self.selected_keys = self.selected_keys + [key]
 
+    def toggle_uploaded_plot_key(self, key: str):
+        if key in self.uploaded_selected_keys:
+            self.uploaded_selected_keys = [k for k in self.uploaded_selected_keys if k != key]
+        elif len(self.uploaded_selected_keys) < 4:
+            self.uploaded_selected_keys = self.uploaded_selected_keys + [key]
+
     # ── export ────────────────────────────────────────────────────────────
 
-    def export_telemetry_json(self):
-        filename = f"hermes_export_{utc_stamp()}.json"
-        data = json.dumps(self.telemetry_history, indent=2)
-        self._log_event(f"Exported telemetry as {filename}")
-        return rx.download(data=data, filename=filename)
+    def set_selected_telemetry_log_file(self, value: str):
+        self.selected_telemetry_log_file = value
+
+    def set_selected_event_log_file(self, value: str):
+        self.selected_event_log_file = value
+
+    def export_selected_telemetry_log_file(self):
+        file_name = self.active_selected_telemetry_log_file
+        if not file_name:
+            self._log_warning("No telemetry log file selected for export")
+            return
+        path = TELEMETRY_DIR / file_name
+        if not path.exists():
+            self._log_error(f"Telemetry log file not found: {file_name}")
+            return
+        self._log_info(f"Exported telemetry log file {file_name}")
+        return rx.download(data=path.read_text(encoding="utf-8"), filename=file_name)
+
+    def export_selected_event_log_file(self):
+        file_name = self.active_selected_event_log_file
+        if not file_name:
+            self._log_warning("No event log file selected for export")
+            return
+        path = LOG_DIR / file_name
+        if not path.exists():
+            self._log_error(f"Event log file not found: {file_name}")
+            return
+        self._log_info(f"Exported event log file {file_name}")
+        return rx.download(data=path.read_text(encoding="utf-8"), filename=file_name)
 
     # ── file upload / parse ───────────────────────────────────────────────
 
     async def handle_upload(self, files: list[rx.UploadFile]):
         for file in files:
             data = await file.read()
+            self.uploaded_file_name = file.filename
+            self.uploaded_file_size = len(data)
+            self.upload_status = f"Staged {file.filename} — {len(data)} bytes"
+            self._log_info(f"Staged generic upload file {file.filename}")
+
+    def clear_staged_upload(self):
+        self.upload_status = ""
+        self.uploaded_file_name = ""
+        self.uploaded_file_size = 0
+        self._log_info("Cleared staged generic upload file")
+
+    async def handle_telemetry_upload(self, files: list[rx.UploadFile]):
+        for file in files:
+            data = await file.read()
+            self.telemetry_upload_name = file.filename
             try:
-                parsed = json.loads(data)
-                self.uploaded_json = parsed if isinstance(parsed, dict) else {"data": parsed}
-                self.upload_status = f"Parsed {file.filename} — {len(self.uploaded_json)} top-level keys"
-                self._log_event(f"Uploaded & parsed: {file.filename}")
+                parsed = parse_json_or_jsonl(data, file.filename)
+                normalized_rows, _ = validate_telemetry_dataset(parsed)
+                self.uploaded_telemetry_data = normalized_rows
+                self.telemetry_upload_status = (
+                    f"Validated {file.filename} — {len(normalized_rows)} telemetry records loaded"
+                )
+                self.uploaded_selected_keys = []
+                self._log_info(f"Validated telemetry analysis file {file.filename}")
             except Exception as e:
-                self.upload_status = f"Parse error: {e}"
-                self._log_event(f"Upload parse error ({file.filename}): {e}")
+                self.uploaded_telemetry_data = []
+                self.uploaded_selected_keys = []
+                self.telemetry_upload_status = f"Telemetry file error: {e}"
+                self._log_error(f"Telemetry file parse error for {file.filename}: {e}")
+
+    def clear_telemetry_upload(self):
+        self.telemetry_upload_status = ""
+        self.telemetry_upload_name = ""
+        self.uploaded_telemetry_data = []
+        self.uploaded_selected_keys = []
+        self._log_info("Cleared telemetry analysis file")
 
     # ── computed ─────────────────────────────────────────────────────────
 
@@ -253,7 +447,74 @@ class HermesState(rx.State):
         return fig
 
     @rx.var
-    def uploaded_json_preview(self) -> str:
-        if not self.uploaded_json:
-            return ""
-        return json.dumps(self.uploaded_json, indent=2)[:2000]
+    def uploaded_telemetry_rows(self) -> list[dict[str, Any]]:
+        return self.uploaded_telemetry_data
+
+    @rx.var
+    def telemetry_log_files(self) -> list[str]:
+        return sorted(
+            [path.name for path in TELEMETRY_DIR.glob("hermes_telemetry_*.jsonl")],
+            reverse=True,
+        )
+
+    @rx.var
+    def event_log_files(self) -> list[str]:
+        return sorted(
+            [path.name for path in LOG_DIR.glob("hermes_events_*.jsonl")],
+            reverse=True,
+        )
+
+    @rx.var
+    def active_selected_telemetry_log_file(self) -> str:
+        if self.selected_telemetry_log_file in self.telemetry_log_files:
+            return self.selected_telemetry_log_file
+        return self.telemetry_log_files[0] if self.telemetry_log_files else ""
+
+    @rx.var
+    def active_selected_event_log_file(self) -> str:
+        if self.selected_event_log_file in self.event_log_files:
+            return self.selected_event_log_file
+        return self.event_log_files[0] if self.event_log_files else ""
+
+    @rx.var
+    def uploaded_telemetry_keys(self) -> list[str]:
+        keys: list[str] = []
+        for row in self.uploaded_telemetry_rows:
+            for key in row:
+                if key != "timestamp" and key not in keys:
+                    keys.append(key)
+        return keys
+
+    @rx.var
+    def uploaded_plot_figure(self) -> go.Figure:
+        fig = go.Figure()
+        fig.update_layout(
+            paper_bgcolor="#111820",
+            plot_bgcolor="#0a0e14",
+            font=dict(color="#cdd9e5", family="'JetBrains Mono', monospace", size=10),
+            xaxis=dict(gridcolor="#1e2d3d", linecolor="#1e2d3d", title="Timestamp"),
+            yaxis=dict(gridcolor="#1e2d3d", linecolor="#1e2d3d"),
+            legend=dict(bgcolor="rgba(0,0,0,0)"),
+            margin=dict(l=50, r=20, t=20, b=60),
+        )
+        if not self.uploaded_selected_keys or not self.uploaded_telemetry_rows:
+            return fig
+        colors = ["#00e5ff", "#ff4081", "#69ff47", "#ffab00"]
+        for i, key in enumerate(self.uploaded_selected_keys):
+            xs, ys = [], []
+            for index, row in enumerate(self.uploaded_telemetry_rows):
+                if key in row:
+                    xs.append(row.get("timestamp", index))
+                    try:
+                        ys.append(float(row[key]))
+                    except (ValueError, TypeError):
+                        ys.append(None)
+            fig.add_trace(go.Scatter(
+                x=xs,
+                y=ys,
+                name=key,
+                mode="lines+markers",
+                line=dict(color=colors[i % len(colors)], width=2),
+                marker=dict(size=4),
+            ))
+        return fig

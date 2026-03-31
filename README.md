@@ -98,7 +98,7 @@ Then connect Hermes to `127.0.0.1:5001` with a 1s poll interval.
 
 - `/tmp/hermes/telemetry/hermes_telemetry_<timestamp>_partNNN.jsonl` — rotated telemetry logs
 - `/tmp/hermes/logs/hermes_events_<timestamp>_partNNN.jsonl` — rotated event logs
-- `docs/application-requirements.md` — requirements source for the Hermes feature set
+- `docs/requirements.md` — requirements source for the Hermes feature set
 
 ## Disclaimer
 
